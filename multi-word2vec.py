@@ -109,6 +109,9 @@ except ImportError:
         will use the optimized version from word2vec_inner instead.
 
         """
+        """
+        =============jjx=================
+        """
         labels = []
         if model.negative:
             # precompute negative labels
@@ -126,7 +129,7 @@ except ImportError:
             for pos2, word2 in enumerate(sentence[start : pos + model.window + 1 - reduced_window], start):
                 average_context = model.syn0[word2.index]
             average_context /= pos + model.window + 1 - reduced_window - start + 1
-            sense_num = get_sense_num(model,average_context)
+            sense_num = get_sense_num(model, average_context)
             for pos2, word2 in enumerate(sentence[start : pos + model.window + 1 - reduced_window], start):
                 # don't train on OOV words and on the `word` itself
                 if word2 and not (pos2 == pos):
@@ -408,9 +411,15 @@ class Word2Vec(utils.SaveLoad):
         self.vocab, self.index2word = {}, []
         for word, v in iteritems(vocab):
             if v.count >= self.min_count:
-                v.index = len(self.vocab)
-                self.index2word.append(word)
-                self.vocab[word] = v
+                """
+                ============jjx================
+                """
+                for sense_no in range(self.sense):
+                    sense_v = v
+                    sense_word = word + "#" + str(sense_no)
+                    sense_v.index = len(self.vocab)
+                    self.index2word.append(sense_word)
+                    self.vocab[sense_word] = sense_v
         logger.info("total %i word types after removing those with count<%s" % (len(self.vocab), self.min_count))
 
         if self.hs:
