@@ -90,7 +90,7 @@ from gensim import utils, matutils  # utility fnc for pickling, common scipy ope
 from six import iteritems, itervalues, string_types
 from six.moves import xrange
 from types import GeneratorType
-
+import copy
 
 try:
     from gensim.models.word2vec_inner import train_sentence_sg, train_sentence_cbow, FAST_VERSION
@@ -126,16 +126,68 @@ except ImportError:
             # now go over all words from the (reduced) window, predicting each one in turn
             start = max(0, pos - model.window + reduced_window)
             average_context = zeros(model.layer1_size)
+            context_count = 0
             for pos2, word2 in enumerate(sentence[start : pos + model.window + 1 - reduced_window], start):
-                average_context = model.syn0[word2.index]
-            average_context /= pos + model.window + 1 - reduced_window - start + 1
-            sense_num = get_sense_num(model, average_context)
+                if word2 and not (pos2 == pos):
+                    average_context += model.syn1neg[word2.index]
+                    context_count += 1
+            average_context /= context_count
+            sense_no = get_sense_num(model, word, average_context)
+            update_center(model, word, sense_no, average_context)
+
+            word_sense_str = model.index2word[word.index] + "#" + str(sense_no)
+            word_sense = model.vocab_sense.get(word_sense_str)
+            if word_sense is None:
+                continue
+
             for pos2, word2 in enumerate(sentence[start : pos + model.window + 1 - reduced_window], start):
                 # don't train on OOV words and on the `word` itself
                 if word2 and not (pos2 == pos):
-                    train_sg_pair(model, word, word2, alpha, labels)
-
+                    train_sg_pair(model, word_sense, word2, alpha, labels)
         return len([word for word in sentence if word is not None])
+
+
+    def get_sense_num(model, word, average_context):
+        # get_all_center of word
+        all_center = []
+        word_str = model.index2word[word.index]
+        for i in range(model.MAX_SENSE):
+            word_sense_str = word_str + "#" + str(i)
+            if model.vocab_sense.get(word_sense_str):
+                word_node = model.vocab_sense[word_sense_str]
+                node_index = word_node.index
+                if node_index >= len(model.syn1center):
+                    logger.warning("node_index %d" % node_index)
+                    logger.warning("syn1center_len %d" % len(model.syn1center))
+                    logger.warning("vocab_sense_len %d" % len(model.vocab_sense))
+                c = model.syn1center[node_index]
+                all_center.append(model.syn1center[model.vocab_sense[word_sense_str].index])
+            else:
+                break #reach the last sense
+        closest = -1
+        sense_no = -1
+        for i in range(len(all_center)):
+            distance = calculate_distance(all_center[i], average_context)
+            if closest < 0 or distance < closest:
+                closest = distance
+                sense_no = i
+        return sense_no
+
+    def calculate_distance(vector1, vector2):
+        sqr_vector = (vector1 - vector2)**2
+        distance = sqr_vector.sum()**0.5
+        return distance
+
+    def update_center(model, word, sense_no, average_context):
+        word_str = model.index2word[word.index]
+        word_sense_str = word_str + "#" + str(sense_no)
+        word_sense = model.vocab_sense[word_sense_str]
+        center = model.syn1center[word_sense.index]
+        center_node_count = model.syn1center_node_count[word_sense.index]
+        center_node_count += 1
+        center -= (center - average_context) / center_node_count
+        model.syn1center[word_sense.index] = center
+        model.syn1center_node_count[word_sense.index] = center_node_count
 
     def train_sentence_cbow(model, sentence, alpha, work=None, neu1=None):
         """
@@ -170,24 +222,24 @@ except ImportError:
 
 
 def train_sg_pair(model, word, word2, alpha, labels, train_w1=True, train_w2=True):
-    l1 = model.syn0[word2.index]
+    l1 = model.syn0[word.index]
     neu1e = zeros(l1.shape)
 
     if model.hs:
         # work on the entire tree at once, to push as much work into numpy's C routines as possible (performance)
-        l2a = deepcopy(model.syn1[word.point])  # 2d matrix, codelen x layer1_size
+        l2a = deepcopy(model.syn1[word2.point])  # 2d matrix, codelen x layer1_size
         fa = 1.0 / (1.0 + exp(-dot(l1, l2a.T)))  # propagate hidden -> output
-        ga = (1 - word.code - fa) * alpha  # vector of error gradients multiplied by the learning rate
+        ga = (1 - word2.code - fa) * alpha  # vector of error gradients multiplied by the learning rate
         if train_w1:
-            model.syn1[word.point] += outer(ga, l1)  # learn hidden -> output
+            model.syn1[word2.point] += outer(ga, l1)  # learn hidden -> output
         neu1e += dot(ga, l2a)  # save error
 
     if model.negative:
         # use this word (label = 1) + `negative` other random words not from this sentence (label = 0)
-        word_indices = [word.index]
+        word_indices = [word2.index]
         while len(word_indices) < model.negative + 1:
             w = model.table[random.randint(model.table.shape[0])]
-            if w != word.index:
+            if w != word2.index:
                 word_indices.append(w)
         l2b = model.syn1neg[word_indices]  # 2d matrix, k+1 x layer1_size
         fb = 1. / (1. + exp(-dot(l1, l2b.T)))  # propagate hidden -> output
@@ -196,7 +248,7 @@ def train_sg_pair(model, word, word2, alpha, labels, train_w1=True, train_w2=Tru
             model.syn1neg[word_indices] += outer(gb, l1)  # learn hidden -> output
         neu1e += dot(gb, l2b)  # save error
     if train_w2:
-        model.syn0[word2.index] += neu1e  # learn input -> hidden
+        model.syn0[word.index] += neu1e  # learn input -> hidden
     return neu1e
 
 
@@ -253,7 +305,7 @@ class Word2Vec(utils.SaveLoad):
     """
     def __init__(self, sentences=None, size=100, alpha=0.025, window=5, min_count=5,
         sample=0, seed=1, workers=1, min_alpha=0.0001, sg=1, hs=1, negative=0,
-        cbow_mean=0, hashfxn=hash, iter=1, sense=0):
+        cbow_mean=0, hashfxn=hash, iter=1, sense=1):
         """
         Initialize the model from an iterable of `sentences`. Each sentence is a
         list of words (unicode strings) that will be used for training.
@@ -319,6 +371,7 @@ class Word2Vec(utils.SaveLoad):
         self.hashfxn = hashfxn
         self.iter = iter
         self.sense = sense
+        self.MAX_SENSE = 10
         if sentences is not None:
             if isinstance(sentences, GeneratorType):
                 raise TypeError("You can't pass a generator as the sentences argument. Try an iterator.")
@@ -396,6 +449,11 @@ class Word2Vec(utils.SaveLoad):
             total_words = sum(v.count for v in itervalues(self.vocab))
             threshold_count = float(self.sample) * total_words
         for v in itervalues(self.vocab):
+
+            if v.count == 0:
+                logger.info("===============v count %d" % v.count)
+            #logger.info("===============word %s" % self.index2word[v.index])
+
             prob = (sqrt(v.count / threshold_count) + 1) * (threshold_count / v.count) if self.sample else 1.0
             v.sample_probability = min(prob, 1.0)
 
@@ -409,17 +467,21 @@ class Word2Vec(utils.SaveLoad):
         vocab = self._vocab_from(sentences)
         # assign a unique index to each word
         self.vocab, self.index2word = {}, []
+        self.vocab_sense, self.index2word_sense = {}, []
         for word, v in iteritems(vocab):
             if v.count >= self.min_count:
+                v.index = len(self.vocab)
+                self.index2word.append(word)
+                self.vocab[word] = v
                 """
                 ============jjx================
                 """
                 for sense_no in range(self.sense):
-                    sense_v = v
+                    sense_v = copy.copy(v)
                     sense_word = word + "#" + str(sense_no)
-                    sense_v.index = len(self.vocab)
-                    self.index2word.append(sense_word)
-                    self.vocab[sense_word] = sense_v
+                    sense_v.index = len(self.vocab_sense)
+                    self.index2word_sense.append(sense_word)
+                    self.vocab_sense[sense_word] = sense_v
         logger.info("total %i word types after removing those with count<%s" % (len(self.vocab), self.min_count))
 
         if self.hs:
@@ -532,17 +594,20 @@ class Word2Vec(utils.SaveLoad):
     def reset_weights(self):
         """Reset all projection weights to an initial (untrained) state, but keep the existing vocabulary."""
         logger.info("resetting layer weights")
-        self.syn0 = empty((len(self.vocab), self.layer1_size), dtype=REAL)
+        #=========================jjx====================
+        self.syn0 = empty((len(self.vocab_sense), self.layer1_size), dtype=REAL)
         # randomize weights vector by vector, rather than materializing a huge random matrix in RAM at once
-        for i in xrange(len(self.vocab)):
+        for i in xrange(len(self.vocab_sense)):
             # construct deterministic seed from word AND seed argument
             # Note: Python's built in hash function can vary across versions of Python
-            random.seed(uint32(self.hashfxn(self.index2word[i] + str(self.seed))))
+            random.seed(uint32(self.hashfxn(self.index2word_sense[i] + str(self.seed))))
             self.syn0[i] = (random.rand(self.layer1_size) - 0.5) / self.layer1_size
         if self.hs:
             self.syn1 = zeros((len(self.vocab), self.layer1_size), dtype=REAL)
         if self.negative:
             self.syn1neg = zeros((len(self.vocab), self.layer1_size), dtype=REAL)
+            self.syn1center = zeros((len(self.vocab_sense), self.layer1_size), dtype=REAL)
+            self.syn1center_node_count = zeros((len(self.vocab_sense), self.layer1_size), dtype=REAL)
         self.syn0norm = None
 
 
@@ -555,19 +620,42 @@ class Word2Vec(utils.SaveLoad):
         if fvocab is not None:
             logger.info("Storing vocabulary in %s" % (fvocab))
             with utils.smart_open(fvocab, 'wb') as vout:
-                for word, vocab in sorted(iteritems(self.vocab), key=lambda item: -item[1].count):
+                for word, vocab in sorted(iteritems(self.vocab_sense), key=lambda item: -item[1].count):
                     vout.write(utils.to_utf8("%s %s\n" % (word, vocab.count)))
-        logger.info("storing %sx%s projection weights into %s" % (len(self.vocab), self.layer1_size, fname))
-        assert (len(self.vocab), self.layer1_size) == self.syn0.shape
+        logger.info("storing %sx%s projection weights into %s" % (len(self.vocab_sense), self.layer1_size, fname))
+        assert (len(self.vocab_sense), self.layer1_size) == self.syn0.shape
         with utils.smart_open(fname, 'wb') as fout:
             fout.write(utils.to_utf8("%s %s\n" % self.syn0.shape))
             # store in sorted order: most frequent words at the top
-            for word, vocab in sorted(iteritems(self.vocab), key=lambda item: -item[1].count):
+            for word, vocab in sorted(iteritems(self.vocab_sense), key=lambda item: -item[1].count):
                 row = self.syn0[vocab.index]
                 if binary:
                     fout.write(utils.to_utf8(word) + b" " + row.tostring())
                 else:
                     fout.write(utils.to_utf8("%s %s\n" % (word, ' '.join("%f" % val for val in row))))
+
+        assert (len(self.vocab), self.layer1_size) == self.syn1neg.shape
+        with utils.smart_open(fname + '.global', 'wb') as fout:
+            fout.write(utils.to_utf8("%s %s\n" % self.syn1neg.shape))
+            # store in sorted order: most frequent words at the top
+            for word, vocab in sorted(iteritems(self.vocab), key=lambda item: -item[1].count):
+                row = self.syn1neg[vocab.index]
+                if binary:
+                    fout.write(utils.to_utf8(word) + b" " + row.tostring())
+                else:
+                    fout.write(utils.to_utf8("%s %s\n" % (word, ' '.join("%f" % val for val in row))))
+
+        assert (len(self.vocab_sense), self.layer1_size) == self.syn1center.shape
+        with utils.smart_open(fname + '.center', 'wb') as fout:
+            fout.write(utils.to_utf8("%s %s\n" % self.syn1center.shape))
+            # store in sorted order: most frequent words at the top
+            for word, vocab in sorted(iteritems(self.vocab_sense), key=lambda item: -item[1].count):
+                row = self.syn1center[vocab.index]
+                if binary:
+                    fout.write(utils.to_utf8(word) + b" " + row.tostring())
+                else:
+                    fout.write(utils.to_utf8("%s %s\n" % (word, ' '.join("%f" % val for val in row))))
+
 
 
     @classmethod
