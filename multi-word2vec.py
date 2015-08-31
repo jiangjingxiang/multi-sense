@@ -132,7 +132,7 @@ except ImportError:
                     average_context += model.syn1neg[word2.index]
                     context_count += 1
             average_context /= context_count
-            sense_no = get_sense_num(model, word, average_context)
+            sense_no = get_sense_no(model, word, average_context)
             update_center(model, word, sense_no, average_context)
 
             word_sense_str = model.index2word[word.index] + "#" + str(sense_no)
@@ -147,7 +147,7 @@ except ImportError:
         return len([word for word in sentence if word is not None])
 
 
-    def get_sense_num(model, word, average_context):
+    def get_sense_no(model, word, average_context):
         # get_all_center of word
         all_center = []
         word_str = model.index2word[word.index]
